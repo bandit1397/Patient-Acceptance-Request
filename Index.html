@@ -64,9 +64,6 @@
   @keyframes blink { 50% { background: #7a1410; } }
   .card.pending { border: 2px solid var(--red); }
   .steps { padding-left: 20px; margin: 0 0 8px; } .steps li { margin-bottom: 10px; }
-  .topic { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
-  .topic code { flex: 1; padding: 10px; background: #eef1f5; border-radius: 8px; font-size: 15px; word-break: break-all; user-select: all; }
-  .topic button { padding: 8px 12px; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -99,6 +96,8 @@
         <input type="text" id="sHospital" placeholder="예: OO대학교병원 응급실">
         <label class="f">요청을 받을 지역 (선택 안 하면 전체)</label>
         <div class="chips" id="sRegions"></div>
+        <label class="f">알림 받을 Gmail 주소 (화면이 꺼져도 알림)</label>
+        <input type="email" id="sEmail" placeholder="예: er.hospital@gmail.com">
       </div>
 
       <div id="setupCode" class="hidden">
@@ -131,16 +130,15 @@
     <div class="alarm hidden" id="hAlarm"></div>
     <div class="card hidden" id="hPush">
       <h2>📱 화면이 꺼져도 알림 받기 (최초 1회)</h2>
+      <p id="hMailState"></p>
       <ol class="steps">
-        <li><b>ntfy</b> 앱 설치 (무료·가입 불필요):
-          <a class="tel" href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" target="_blank">안드로이드</a> ·
-          <a class="tel" href="https://apps.apple.com/app/ntfy/id1625396347" target="_blank">아이폰</a></li>
-        <li>앱에서 <b>＋</b>(주제 구독) → 아래 주제 이름 입력 → <b>구독</b>
-          <div class="topic"><code id="hTopic"></code><button class="btn-line" id="btnCopyTopic">복사</button></div></li>
-        <li>안드로이드: 앱 설정 → <b>최우선 알림 계속 울리기</b>(Keep alerting for highest priority)를 켜면 확인할 때까지 계속 울립니다.</li>
+        <li>휴대폰에 <b>Gmail 앱</b>을 설치하고 위 주소로 로그인합니다.</li>
+        <li>Gmail 앱 → 설정 → 계정 → <b>알림: 모두</b>로 바꾸고, 휴대폰 설정에서 Gmail 알림 소리를 켭니다.</li>
+        <li>안드로이드: 휴대폰 설정 → 배터리 → Gmail을 <b>최적화 안 함</b>으로 두면 더 빨리 옵니다.</li>
       </ol>
-      <p class="muted">수용 가능/불가를 누르기 전까지 2분마다 다시 알림이 옵니다. 알림에는 환자 상태가 담기지 않습니다.</p>
-      <button class="btn-line" id="btnPushDone">설정 완료 — 이 안내 숨기기</button>
+      <p class="muted">새 요청이 오면 메일이 오고, 수용 가능/불가를 누르기 전까지 5분마다(최대 3회) 다시 옵니다. 메일에는 환자 상태가 담기지 않습니다.
+        주소를 바꾸려면 위쪽 <b>설정</b>을 누르세요.</p>
+      <button class="btn-line" id="btnPushDone">확인 — 이 안내 숨기기</button>
     </div>
     <p class="muted" id="hInfo"></p>
     <p class="muted"><a class="tel" href="#" id="lnkPush">📱 화면 꺼짐 알림 설정 보기</a></p>
@@ -240,6 +238,7 @@ function showSetup() {
     $('sOfficer').value = profile.officer || '';
     $('sContact').value = profile.contact || '';
     $('sHospital').value = profile.name || '';
+    $('sEmail').value = profile.email || '';
     $('sCode').value = profile.code || '';
     pickRole(profile.role);
   }
@@ -262,7 +261,9 @@ $('btnStart').onclick = async () => {
   } else {
     p.name = $('sHospital').value.trim();
     p.regions = checkedValues('sRegion');
+    p.email = $('sEmail').value.trim();
     if (!p.name) return toast('병원명을 입력하세요.');
+    if (p.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(p.email)) return toast('이메일 주소 형식을 확인하세요.');
   }
   $('btnStart').disabled = true;
   try {
@@ -300,19 +301,22 @@ function enter() {
   startPolling();
 }
 
-// 화면이 꺼져도 알림을 받도록 이 병원을 알림 대상에 등록하고 ntfy 주제를 안내한다.
+// 화면이 꺼져도 Gmail로 알림을 받도록 이 병원을 알림 대상에 등록하고 안내한다.
 async function registerPush() {
+  const email = profile.email || '';
+  $('hMailState').innerHTML = email
+    ? `✅ 알림 메일 주소: <b>${esc(email)}</b>`
+    : '⚠ 알림 메일 주소가 없습니다. 위쪽 <b>설정</b>에서 Gmail 주소를 입력해야 화면이 꺼져도 알림이 옵니다.';
+  // 처음이거나 주소가 바뀌었거나 주소가 없으면 안내를 보여준다.
+  $('hPush').classList.toggle('hidden', !!email && profile.pushEmail === email);
   try {
-    const info = await call('registerHospital', profile.code, profile.name, profile.regions);
-    $('hTopic').textContent = info.topic;
-    const shown = profile.pushTopic !== info.topic;  // 처음이거나 병원명이 바뀌면 다시 안내
-    $('hPush').classList.toggle('hidden', !shown);
+    await call('registerHospital', profile.code, profile.name, profile.regions, email);
   } catch (e) {
     toast('알림 등록 실패: ' + errMsg(e));
   }
 }
 $('btnPushDone').onclick = () => {
-  profile.pushTopic = $('hTopic').textContent;
+  profile.pushEmail = profile.email || '';
   save('par_profile', profile);
   $('hPush').classList.add('hidden');
 };
@@ -320,11 +324,6 @@ $('lnkPush').onclick = (ev) => {
   ev.preventDefault();
   $('hPush').classList.remove('hidden');
   $('hPush').scrollIntoView({ behavior: 'smooth' });
-};
-$('btnCopyTopic').onclick = async () => {
-  const t = $('hTopic').textContent;
-  try { await navigator.clipboard.writeText(t); toast('복사했습니다: ' + t); }
-  catch (e) { toast('길게 눌러 직접 복사하세요: ' + t); }
 };
 
 $('btnSend').onclick = async () => {

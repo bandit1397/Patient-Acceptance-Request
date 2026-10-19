@@ -12,10 +12,10 @@ const CONFIG = {
   TYPES: ['주취자', '정신응급', '일반응급', '외상', '기타'],
   REGIONS: ['서울', '인천', '경기', '기타'],
   STATUSES: ['accept', 'reject', 'call'], // 수용 가능 / 수용 불가 / 전화 확인 필요
-  // 화면이 꺼져도 오는 푸시 알림 (ntfy 앱, 무료·가입 불필요)
-  NTFY_SERVER: 'https://ntfy.sh',
-  REMIND_EVERY_MIN: 2,  // 수용 가능/불가 응답 전까지 이 간격으로 다시 알림
-  MAX_PUSHES: 6,        // 요청 1건당 병원별 최대 알림 횟수 (무료 서버 한도 보호)
+  // 화면이 꺼져도 오는 알림: 병원 Gmail로 메일 발송 (무료 계정 하루 100통 한도)
+  REMIND_EVERY_MIN: 5,  // 수용 가능/불가 응답 전까지 이 간격으로 다시 알림
+  MAX_PUSHES: 3,        // 요청 1건당 병원별 최대 알림 횟수 (첫 알림 + 재알림 2회)
+  MAIL_RESERVE: 5,      // 하루 남은 발송량이 이보다 적으면 재알림은 보내지 않음
   CALL_SNOOZE_MIN: 2,   // '전화 확인' 응답 후 알림을 멈추는 시간
   HOSPITAL_KEEP_DAYS: 30, // 이 기간 접속하지 않은 병원은 알림 대상에서 제외
 };
@@ -65,12 +65,14 @@ function createRequest(code, data) {
   return req;
 }
 
-/** 병원 화면에 들어올 때 호출: 알림 대상에 등록하고 이 병원의 ntfy 주제 이름을 돌려준다. */
-function registerHospital(code, name, regions) {
+/** 병원 화면에 들어올 때 호출: 알림 받을 Gmail 주소와 함께 알림 대상에 등록한다. */
+function registerHospital(code, name, regions, email) {
   checkCode_(code);
   name = clean_(name, 40);
   if (!name) throw new Error('병원명을 입력하세요.');
   regions = (regions || []).filter((r) => CONFIG.REGIONS.indexOf(r) >= 0);
+  email = clean_(email, 100);
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('이메일 주소 형식이 올바르지 않습니다.');
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
@@ -78,9 +80,9 @@ function registerHospital(code, name, regions) {
     const hospitals = JSON.parse(props.getProperty(HOSPITALS_KEY) || '{}');
     const cutoff = Date.now() - CONFIG.HOSPITAL_KEEP_DAYS * 86400000;
     Object.keys(hospitals).forEach((h) => { if (hospitals[h].seen < cutoff) delete hospitals[h]; });
-    hospitals[name] = { regions: regions, topic: topicFor_(name), seen: Date.now() };
+    hospitals[name] = { regions: regions, email: email, seen: Date.now() };
     props.setProperty(HOSPITALS_KEY, JSON.stringify(hospitals));
-    return { server: CONFIG.NTFY_SERVER, topic: hospitals[name].topic };
+    return { email: email };
   } finally {
     lock.releaseLock();
   }
@@ -115,22 +117,21 @@ function closeRequest(code, id, chosen) {
   });
   if (chosen) {
     const h = hospitals_()[chosen];
-    if (h) sendPushes_([push_(h.topic, '🚑 귀 병원으로 이송 결정', `요청 ${id} — 환자가 귀 병원으로 이송됩니다.`, 5)]);
+    if (h && h.email) sendMails_([mail_(h.email, `🚑 [이송 결정] 요청 ${id} — 귀 병원으로 이송됩니다`, '환자가 귀 병원으로 이송됩니다.')]);
   }
   return true;
 }
 
-/* ---------- 푸시 알림 (ntfy) ---------- */
+/* ---------- 알림 메일 (Gmail) ---------- */
 
-/** 1회만 편집기에서 실행: 권한 승인 + 1분마다 재알림 트리거 설치 */
+/** 1회만 편집기에서 실행: 메일 발송 권한 승인 + 1분마다 재알림 트리거 설치 */
 function setup() {
   ScriptApp.getProjectTriggers()
     .filter((t) => t.getHandlerFunction() === 'remind')
     .forEach((t) => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('remind').timeBased().everyMinutes(1).create();
-  topicFor_('setup');
-  UrlFetchApp.fetch(CONFIG.NTFY_SERVER, { muteHttpExceptions: true });
-  Logger.log('설정 완료: 응답 대기 요청이 있으면 병원에 %s분마다 다시 알립니다.', CONFIG.REMIND_EVERY_MIN);
+  Logger.log('설정 완료: 오늘 남은 메일 발송량 %s통. 응답 전까지 %s분마다 최대 %s회 알립니다.',
+    MailApp.getRemainingDailyQuota(), CONFIG.REMIND_EVERY_MIN, CONFIG.MAX_PUSHES);
 }
 
 /** 트리거가 1분마다 실행: 아직 수용 가능/불가로 답하지 않은 병원에 다시 알림 */
@@ -142,7 +143,7 @@ function remind() {
 
 function pushPending_(reqs) {
   const hospitals = hospitals_();
-  const names = Object.keys(hospitals);
+  const names = Object.keys(hospitals).filter((n) => hospitals[n].email);
   if (!names.length) return;
   const cache = CacheService.getScriptCache();
   const log = JSON.parse(cache.get(PUSHLOG_KEY) || '{}');
@@ -157,57 +158,48 @@ function pushPending_(reqs) {
       const key = r.id + '|' + name;
       const prev = log[key] || { n: 0, at: 0 };
       if (prev.n >= CONFIG.MAX_PUSHES || now - prev.at < CONFIG.REMIND_EVERY_MIN * 60000 - 10000) return;
-      log[key] = { n: prev.n + 1, at: now };
-      // 환자 상태 문구는 외부 알림 서버로 보내지 않는다.
-      out.push(push_(h.topic,
-        `🚨 환자 수용 요청 (${r.region} · ${r.type})` + (prev.n ? ` — 재알림 ${prev.n}` : ''),
-        `요청 ${r.id} · 앱을 열어 수용 가능/불가를 눌러 주세요.`, 5));
+      log[key] = { n: prev.n + 1, at: now, first: !prev.n };
+      // 환자 상태 문구는 메일에 담지 않는다.
+      out.push(Object.assign(mail_(h.email,
+        `🚨 [수용 요청] ${r.region} · ${r.type} — 요청 ${r.id}` + (prev.n ? ` (재알림 ${prev.n})` : ''),
+        '앱을 열어 수용 가능/불가를 눌러 주세요. 응답할 때까지 다시 알림이 옵니다.'), { key: key }));
     });
   });
   if (!out.length) return;
+  // 하루 발송 한도가 얼마 남지 않으면 첫 알림만 보내고 재알림은 건너뛴다.
+  const firstOnly = MailApp.getRemainingDailyQuota() - out.length < CONFIG.MAIL_RESERVE;
+  const send = firstOnly ? out.filter((m) => log[m.key].first) : out;
   Object.keys(log).forEach((k) => { if (now - log[k].at > CONFIG.REQUEST_TTL_MIN * 60000) delete log[k]; });
   cache.put(PUSHLOG_KEY, JSON.stringify(log), CACHE_SEC);
-  sendPushes_(out);
+  sendMails_(send);
 }
 
-/** 한글 제목은 HTTP 헤더에 넣을 수 없으므로 JSON 본문으로 보낸다. */
-function push_(topic, title, message, priority) {
-  const body = { topic: topic, title: title, message: message, priority: priority, tags: ['rotating_light'] };
-  const url = ScriptApp.getService().getUrl();
-  if (url) body.click = url;
+function mail_(to, subject, text) {
+  const url = ScriptApp.getService().getUrl() || '';
   return {
-    url: CONFIG.NTFY_SERVER,
-    method: 'post',
-    contentType: 'application/json; charset=utf-8',
-    payload: JSON.stringify(body),
-    muteHttpExceptions: true,
+    to: to,
+    subject: subject,
+    body: text + (url ? '\n\n' + url : ''),
+    htmlBody: `<p style="font-size:16px">${text}</p>` +
+      (url ? `<p><a href="${url}" style="display:inline-block;padding:12px 20px;background:#c8322b;color:#fff;` +
+        `border-radius:8px;text-decoration:none;font-weight:bold">앱 열기</a></p>` : ''),
+    name: '환자 수용 요청',
   };
 }
 
-function sendPushes_(requests) {
-  try {
-    UrlFetchApp.fetchAll(requests);
-  } catch (e) {
-    // 푸시 실패가 요청 등록·응답을 막지 않도록 기록만 남긴다.
-    console.error('push failed: ' + e);
-  }
+function sendMails_(mails) {
+  mails.forEach((m) => {
+    try {
+      MailApp.sendEmail({ to: m.to, subject: m.subject, body: m.body, htmlBody: m.htmlBody, name: m.name });
+    } catch (e) {
+      // 메일 실패가 요청 등록·응답을 막지 않도록 기록만 남긴다.
+      console.error('mail failed: ' + m.to + ' ' + e);
+    }
+  });
 }
 
 function hospitals_() {
   return JSON.parse(PropertiesService.getScriptProperties().getProperty(HOSPITALS_KEY) || '{}');
-}
-
-/** 병원별 ntfy 주제 이름. 남이 추측하지 못하도록 비밀값을 섞는다. */
-function topicFor_(name) {
-  const props = PropertiesService.getScriptProperties();
-  let secret = props.getProperty('NTFY_SECRET');
-  if (!secret) {
-    secret = Utilities.getUuid().replace(/-/g, '').slice(0, 12);
-    props.setProperty('NTFY_SECRET', secret);
-  }
-  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, secret + '|' + name, Utilities.Charset.UTF_8);
-  const hex = digest.slice(0, 6).map((b) => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
-  return 'par-' + secret.slice(0, 6) + '-' + hex;
 }
 
 /**
