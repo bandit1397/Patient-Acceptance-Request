@@ -63,6 +63,10 @@
     background: var(--red); color: #fff; font-weight: 800; text-align: center; animation: blink 1s step-end infinite; }
   @keyframes blink { 50% { background: #7a1410; } }
   .card.pending { border: 2px solid var(--red); }
+  .steps { padding-left: 20px; margin: 0 0 8px; } .steps li { margin-bottom: 10px; }
+  .topic { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+  .topic code { flex: 1; padding: 10px; background: #eef1f5; border-radius: 8px; font-size: 15px; word-break: break-all; user-select: all; }
+  .topic button { padding: 8px 12px; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -125,7 +129,21 @@
   <!-- 병원 화면 -->
   <section id="hospital" class="hidden">
     <div class="alarm hidden" id="hAlarm"></div>
+    <div class="card hidden" id="hPush">
+      <h2>📱 화면이 꺼져도 알림 받기 (최초 1회)</h2>
+      <ol class="steps">
+        <li><b>ntfy</b> 앱 설치 (무료·가입 불필요):
+          <a class="tel" href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" target="_blank">안드로이드</a> ·
+          <a class="tel" href="https://apps.apple.com/app/ntfy/id1625396347" target="_blank">아이폰</a></li>
+        <li>앱에서 <b>＋</b>(주제 구독) → 아래 주제 이름 입력 → <b>구독</b>
+          <div class="topic"><code id="hTopic"></code><button class="btn-line" id="btnCopyTopic">복사</button></div></li>
+        <li>안드로이드: 앱 설정 → <b>최우선 알림 계속 울리기</b>(Keep alerting for highest priority)를 켜면 확인할 때까지 계속 울립니다.</li>
+      </ol>
+      <p class="muted">수용 가능/불가를 누르기 전까지 2분마다 다시 알림이 옵니다. 알림에는 환자 상태가 담기지 않습니다.</p>
+      <button class="btn-line" id="btnPushDone">설정 완료 — 이 안내 숨기기</button>
+    </div>
     <p class="muted" id="hInfo"></p>
+    <p class="muted"><a class="tel" href="#" id="lnkPush">📱 화면 꺼짐 알림 설정 보기</a></p>
     <div id="hList"></div>
   </section>
 </main>
@@ -276,10 +294,38 @@ function enter() {
     $('hospital').classList.remove('hidden');
     $('police').classList.add('hidden');
     $('hInfo').textContent = '수신 지역: ' + (profile.regions.length ? profile.regions.join(', ') : '전체') +
-      ' · 응답(수용 가능/불가)할 때까지 소리·진동이 계속 울립니다. 화면을 켜 두고, 처음 한 번 화면을 터치해야 소리가 납니다.';
+      ' · 이 화면이 켜져 있으면 응답(수용 가능/불가)할 때까지 소리·진동이 계속 울립니다. 처음 한 번 화면을 터치해야 소리가 납니다.';
+    registerPush();
   }
   startPolling();
 }
+
+// 화면이 꺼져도 알림을 받도록 이 병원을 알림 대상에 등록하고 ntfy 주제를 안내한다.
+async function registerPush() {
+  try {
+    const info = await call('registerHospital', profile.code, profile.name, profile.regions);
+    $('hTopic').textContent = info.topic;
+    const shown = profile.pushTopic !== info.topic;  // 처음이거나 병원명이 바뀌면 다시 안내
+    $('hPush').classList.toggle('hidden', !shown);
+  } catch (e) {
+    toast('알림 등록 실패: ' + errMsg(e));
+  }
+}
+$('btnPushDone').onclick = () => {
+  profile.pushTopic = $('hTopic').textContent;
+  save('par_profile', profile);
+  $('hPush').classList.add('hidden');
+};
+$('lnkPush').onclick = (ev) => {
+  ev.preventDefault();
+  $('hPush').classList.remove('hidden');
+  $('hPush').scrollIntoView({ behavior: 'smooth' });
+};
+$('btnCopyTopic').onclick = async () => {
+  const t = $('hTopic').textContent;
+  try { await navigator.clipboard.writeText(t); toast('복사했습니다: ' + t); }
+  catch (e) { toast('길게 눌러 직접 복사하세요: ' + t); }
+};
 
 $('btnSend').onclick = async () => {
   const data = {
