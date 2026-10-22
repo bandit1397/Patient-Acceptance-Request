@@ -26,8 +26,10 @@ const PREFIX = 'req_';
 const CACHE_SEC = 21600; // CacheService 최대 보관 시간(6시간)
 const HOSPITALS_KEY = 'hospitals';
 const PUSHLOG_KEY = 'pushlog_v1';
+const APP_URL_KEY = 'WEBAPP_URL';
 
 function doGet() {
+  rememberAppUrl_();
   return HtmlService.createHtmlOutputFromFile('Index')
     .setTitle('환자 수용 요청')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
@@ -174,8 +176,30 @@ function pushPending_(reqs) {
   sendMails_(send);
 }
 
-function mail_(to, subject, text) {
+/**
+ * 트리거에서 getUrl()은 편집자 전용 /dev 주소를 돌려줄 수 있으므로,
+ * 웹앱으로 접속했을 때의 공개 /exec 주소를 저장해 두고 메일 링크에 쓴다.
+ */
+function rememberAppUrl_() {
+  try {
+    const url = ScriptApp.getService().getUrl() || '';
+    if (!/\/exec$/.test(url)) return;
+    const props = PropertiesService.getScriptProperties();
+    if (props.getProperty(APP_URL_KEY) !== url) props.setProperty(APP_URL_KEY, url);
+  } catch (e) {
+    console.error('remember url failed: ' + e);
+  }
+}
+
+function appUrl_() {
+  const saved = PropertiesService.getScriptProperties().getProperty(APP_URL_KEY);
+  if (saved) return saved;
   const url = ScriptApp.getService().getUrl() || '';
+  return /\/exec$/.test(url) ? url : ''; // /dev 주소는 병원이 열 수 없으므로 넣지 않는다.
+}
+
+function mail_(to, subject, text) {
+  const url = appUrl_();
   return {
     to: to,
     subject: subject,
