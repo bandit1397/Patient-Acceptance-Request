@@ -28,11 +28,40 @@ const HOSPITALS_KEY = 'hospitals';
 const PUSHLOG_KEY = 'pushlog_v1';
 const APP_URL_KEY = 'WEBAPP_URL';
 
-function doGet() {
+function doGet(e) {
+  const p = (e && e.parameter) || {};
+  if (p.check) return ContentService.createTextOutput(checkPending_(p.code, p.name));
   rememberAppUrl_();
   return HtmlService.createHtmlOutputFromFile('Index')
     .setTitle('환자 수용 요청')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/**
+ * 휴대폰 자동화 앱(MacroDroid)이 1분마다 호출: ...exec?check=1&code=접속코드&name=병원이름
+ * 이 병원이 아직 수용 가능/불가로 답하지 않은 요청이 있으면 NEW, 없으면 NONE.
+ * 환자 정보는 돌려주지 않는다.
+ */
+function checkPending_(code, name) {
+  try {
+    checkCode_(code);
+  } catch (err) {
+    return 'ERR_CODE';
+  }
+  name = clean_(name, 40);
+  if (!name) return 'ERR_NAME';
+  const h = hospitals_()[name];
+  const regions = h ? h.regions : [];
+  const state = load_();
+  const now = Date.now();
+  const pending = Object.keys(state).some((id) => {
+    const r = state[id];
+    if (r.status !== 'open' || isExpired_(r, now)) return false;
+    if (regions.length && regions.indexOf(r.region) < 0) return false;
+    const resp = r.responses[name];
+    return !resp || (resp.status === 'call' && now - resp.at > CONFIG.CALL_SNOOZE_MIN * 60000);
+  });
+  return pending ? 'NEW' : 'NONE';
 }
 
 /* ---------- 화면에서 호출하는 함수 (google.script.run) ---------- */
