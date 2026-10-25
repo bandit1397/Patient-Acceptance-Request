@@ -81,7 +81,10 @@ function registerHospital(code, name, regions, email) {
     const props = PropertiesService.getScriptProperties();
     const hospitals = JSON.parse(props.getProperty(HOSPITALS_KEY) || '{}');
     const cutoff = Date.now() - CONFIG.HOSPITAL_KEEP_DAYS * 86400000;
-    Object.keys(hospitals).forEach((h) => { if (hospitals[h].seen < cutoff) delete hospitals[h]; });
+    // 오래된 등록과, 같은 Gmail로 다른 이름에 등록된 항목(이름 변경 등)은 지운다.
+    Object.keys(hospitals).forEach((h) => {
+      if (hospitals[h].seen < cutoff || (email && h !== name && hospitals[h].email === email)) delete hospitals[h];
+    });
     hospitals[name] = { regions: regions, email: email, seen: Date.now() };
     props.setProperty(HOSPITALS_KEY, JSON.stringify(hospitals));
     return { email: email };
@@ -145,16 +148,21 @@ function remind() {
 
 function pushPending_(reqs) {
   const hospitals = hospitals_();
-  const names = Object.keys(hospitals).filter((n) => hospitals[n].email);
+  // 최근 접속한 병원부터: 같은 Gmail로 이름이 여러 개 남아 있으면 최근 이름 하나만 쓴다.
+  const names = Object.keys(hospitals).filter((n) => hospitals[n].email)
+    .sort((a, b) => hospitals[b].seen - hospitals[a].seen);
   if (!names.length) return;
   const cache = CacheService.getScriptCache();
   const log = JSON.parse(cache.get(PUSHLOG_KEY) || '{}');
   const now = Date.now();
   const out = [];
   reqs.forEach((r) => {
+    const seenEmails = {};
     names.forEach((name) => {
       const h = hospitals[name];
       if (h.regions.length && h.regions.indexOf(r.region) < 0) return;
+      if (seenEmails[h.email]) return;
+      seenEmails[h.email] = true;
       const resp = r.responses[name];
       if (resp && !(resp.status === 'call' && now - resp.at > CONFIG.CALL_SNOOZE_MIN * 60000)) return;
       const key = r.id + '|' + name;
@@ -368,6 +376,41 @@ function clean_(v, max) {
 
 function pick_(v, list) {
   return list.indexOf(v) >= 0 ? v : list[list.length - 1];
+}
+
+/** 등록된 병원 목록을 실행 로그에 출력 (편집기에서 수동 실행용) */
+function listHospitals() {
+  const hospitals = hospitals_();
+  const names = Object.keys(hospitals);
+  if (!names.length) Logger.log('등록된 병원이 없습니다.');
+  names.forEach((n) => {
+    const h = hospitals[n];
+    Logger.log('%s | %s | 지역: %s | 마지막 접속: %s', n, h.email || '(메일 없음)',
+      h.regions.join(', ') || '전체', Utilities.formatDate(new Date(h.seen), 'Asia/Seoul', 'yyyy-MM-dd HH:mm'));
+  });
+}
+
+/** 병원 하나를 알림 대상에서 삭제. 편집기에서 아래 이름을 바꾼 뒤 removeHospitalByName 을 실행 */
+function removeHospitalByName() {
+  removeHospital('여기에 병원 이름');
+}
+
+function removeHospital(name) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const hospitals = JSON.parse(props.getProperty(HOSPITALS_KEY) || '{}');
+    if (!hospitals[name]) {
+      Logger.log('"%s" 은(는) 등록되어 있지 않습니다. listHospitals 로 이름을 확인하세요.', name);
+      return;
+    }
+    delete hospitals[name];
+    props.setProperty(HOSPITALS_KEY, JSON.stringify(hospitals));
+    Logger.log('"%s" 삭제 완료', name);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /** 모든 요청을 즉시 삭제 (편집기에서 수동 실행용) */
